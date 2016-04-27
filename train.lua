@@ -1,10 +1,10 @@
 require 'load_midi'
 require 'rbm'
 require 'common'
-require 'image'
 require 'paths'
 require 'nn'
 require 'rnn'
+require 'plot_stats'
 
 cmd = torch.CmdLine()
 cmd:text()
@@ -25,15 +25,15 @@ cmd:option('-momentum',0.5,'momentum')
 
 cmd:option('-sparsity_decay_rate',0.9,'decay rate for sparsity')
 cmd:option('-sparsity_target',0.07,'sparsity target')
-cmd:option('-sparsity_cost',0.055,'sparsity cost')
+cmd:option('-sparsity_cost',0.0085,'sparsity cost')
 
-cmd:option('-rms_learning_rate',0.012,'learning rate for rmsprop')
+cmd:option('-rms_learning_rate',0.04,'learning rate for rmsprop')
 cmd:option('-rms_decay_rate',0.95,'decay rate for rmsprop')
 
 cmd:option('-rho',16,'number of timesteps to unroll for')
-cmd:option('-batch_size',32,'number of sequences to train on in parallel')
+cmd:option('-batch_size',10,'number of sequences to train on in parallel')
 cmd:option('-max_epochs',12,'number of full passes through the training data')
-cmd:option('-stat_interval',128,'statistics interval')
+cmd:option('-stat_interval',2048,'statistics interval')
 cmd:option('-init_rbm_from', '', 'initialize RBM from this file')
 
 opt = cmd:parse(arg)
@@ -165,15 +165,33 @@ else
 	x,dl_dx = rbm:getParameters()
 	qval = torch.zeros(opt.n_hidden, 1)
 	
+	histogramValues = {
+	  weight = rbm.weight,
+	  vbias = rbm.vbias,
+	  hbias = rbm.hbias,
+	  
+	  weightVelocity = weightVelocity,
+	  vbiasVelocity = vbiasVelocity,
+	  hbiasVelocity = hbiasVelocity
+	}
+	
 	batch_time = 1
 	err = 0; iter = 0
-	for epoch=1, opt.max_epochs do
+	pretrain_epochs = opt.max_epochs*4
+	for epoch=1, pretrain_epochs do
 		print('pretrain epoch '..epoch)
 		batch_time = 1
 		
-		if epoch == math.floor(opt.max_epochs*0.5) then config.momentum = 0.8 end
-		if epoch == math.floor(opt.max_epochs*0.72) then config.momentum = 0.9 end
-		if epoch == opt.max_epochs then
+		velocity:zero()
+		
+		if epoch == math.floor(pretrain_epochs*0.5) then
+			torch.save('models/pretrained_rbm_'..epoch..'.dat', rbm)
+			config.momentum = 0.8
+		end
+		if epoch == math.floor(pretrain_epochs*0.72) then
+			config.momentum = 0.9
+		end
+		if epoch == pretrain_epochs then
 			torch.save('models/pretrained_rbm_'..epoch..'.dat', rbm)
 		end
 
@@ -193,8 +211,18 @@ else
 				
 				-- reset counters
 				err = 0; iter = 0
+				
+				draw_hist(rbm.mu1:mean(1), 'mean_hidden-'..epoch..'-'..t)
 			end
 		end
+
+		draw_stats(histogramValues, 'hist_'..epoch)
+
+		gnuplot.pngfigure('images/weight-map_'..epoch..'.png')
+		gnuplot.ylabel('skryté')
+		gnuplot.xlabel('viditelné')
+		gnuplot.imagesc(rbm.weight)
+		gnuplot.plotflush()
 	end
 end
 
@@ -207,68 +235,75 @@ else
 	error("invalid model type")
 end
 
-local bias_inner = nn.ConcatTable()
-		:add(nn.LinearNoBias(opt.n_recurrent, opt.n_visible))
-		:add(nn.LinearNoBias(opt.n_recurrent, opt.n_hidden))
+-- {input(t), output(t-1)} -> outputV(t)
+mlp_inner = nn.Sequential()
+    :add(nn.ParallelTable()
+        :add(nn.Identity())
+        :add(
+            nn.ConcatTable()
+                :add(nn.LinearNoBias(opt.n_recurrent, opt.n_visible))
+                :add(nn.LinearNoBias(opt.n_recurrent, opt.n_hidden))
+        )
+    )
+    :add(nn.FlattenTable())
+    :add(rbm)
 
-bias = nn.Recursor(bias_inner, opt.rho-1)
+mlp = nn.Recursor(mlp_inner, opt.rho-1)
 
 train_size = number_count - 1
-rnn_learning_rate = opt.learning_rate
+rnn_learning_rate = opt.rms_learning_rate
 
 inputs = {}
 for t=1, opt.rho do
 	inputs[t] = torch.Tensor(opt.batch_size, roll_height)
 end
 
-rnnP, rnnG = rnn.recurrentModule:getParameters()
+rnnP, rnnG = rnn:getParameters()
 rnnM = torch.Tensor():typeAs(rnnP):resizeAs(rnnG):zero()
 rnnTmp = torch.Tensor():typeAs(rnnP):resizeAs(rnnG)
 
-biasP, biasG = bias.recurrentModule:getParameters()
-biasM = torch.Tensor():typeAs(biasP):resizeAs(biasG):zero()
-biasTmp = torch.Tensor():typeAs(biasP):resizeAs(biasG)
+mlpP, mlpG = mlp:getParameters()
+mlpM = torch.Tensor():typeAs(mlpP):resizeAs(mlpG):zero()
+mlpTmp = torch.Tensor():typeAs(mlpP):resizeAs(mlpG)
 
 function fine_feval()
     load_batch(batch_time, inputs, opt)
     batch_time = batch_time + 1
 
     rnn:zeroGradParameters()
-    bias:zeroGradParameters()
+    mlp:zeroGradParameters()
+    
+    rnn:forget()
+    mlp:forget()
 
-    -- 1) prop rnn
-    rnn_outputs = {}
-    for step=1,opt.rho-1 do
-      rnn_outputs[step] = rnn:forward(inputs[step])
-    end
+	rnn_outputs, mlp_outputs, mlp_grads  = {}, {}, {}
+	-- 1) prop rnn
+	for step=1,opt.rho-1 do
+		rnn_outputs[step] = rnn:forward(inputs[step])
+	end
 
-    -- 2) generate negative phase of RBM
-    bias_outputs = {}, {}
-    for step=2,opt.rho do
-        bias_outputs[step] = bias:forward(rnn_outputs[step-1])
-        rbm:forward{inputs[step], bias_outputs[step][1], bias_outputs[step][2]}
-    end
+	-- 2) generate negative phase of RBM
+	for step=2,opt.rho do
+		mlp:forward{inputs[step], rnn_outputs[step-1]}
+	end
 
-    -- 3) estimate rbm gradients
-    rbm_grads, mlp_grads = {}, {}
-    for step=opt.rho,2,-1 do
-		rbm_grads[step] = rbm:updateGradInput{inputs[step], bias_outputs[step][1], bias_outputs[step][2]}
-        mlp_grads[step] = bias:backward(rnn_outputs[step-1], {rbm_grads[step][2], rbm_grads[step][3]})
-    end
-
-    -- 4) backprop through time gradients
-    rnn_grads = {}
-    for step=opt.rho-1,1,-1 do
-        rnn_grads[step] = rnn:backward(inputs[step], mlp_grads[step+1])
-    end
-
-	rnn:forget()
-    bias:forget()
+	-- 3) backprop rbm gradients
+	for step=opt.rho,2,-1 do
+		mlp_grads[step] = mlp:backward{inputs[step], rnn_outputs[step-1]}
+	end
 	
-	rmsprop(rnnG, rnnM, rnnTmp, opt)
-	rmsprop(biasG, biasM, biasTmp, opt)
+	-- 4) backprop through time gradients
+	for step=opt.rho-1,1,-1 do
+		rnn:backward(inputs[step], mlp_grads[step+1][2])
+	end
 
-	bias:updateParameters(rnn_learning_rate)
+	--rnn:forget()
+    --mlp:forget()
+
+	--rmsprop(rnnG, rnnM, rnnTmp, opt)
+	--rmsprop(mlpG, mlpM, mlpTmp, opt)
+
+	mlp:updateParameters(rnn_learning_rate)
 	rnn:updateParameters(rnn_learning_rate)
 end
 
@@ -276,14 +311,14 @@ for epoch=1, opt.max_epochs do
 	print('finetune epoch '..epoch)
 	batch_time = 1
 
-	bias:training()
+	mlp:training()
 	rnn:training()
 	rnnM:zero()
-	biasM:zero()
+	mlpM:zero()
 
 	if epoch >= opt.learning_rate_decay_after then
 		rnn_learning_rate = rnn_learning_rate * opt.learning_rate_decay
-		print('decayed learning rate by a factor ' .. decay_factor .. ' to ' .. rnn_learning_rate)
+		print('decayed learning rate by a factor ' .. opt.learning_rate_decay .. ' to ' .. rnn_learning_rate)
 	end
 
     for i = 1, train_size do
@@ -291,9 +326,9 @@ for epoch=1, opt.max_epochs do
 		xlua.progress(i, train_size)
     end
     
-    rnn:evaluate()
-	mlpRec:evaluate()
+    rnn:forget()
+    mlp:forget()
 	
 	torch.save('models/recurrence-rnn_'..epoch..'.dat', rnn)
-	torch.save('models/recurrence-mlp_'..epoch..'.dat', mlpRec)
+	torch.save('models/recurrence-mlp_'..epoch..'.dat', mlp)
 end

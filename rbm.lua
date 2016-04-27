@@ -139,9 +139,9 @@ function RBM:updateGradInput(input)
 		torch.ger(self.negGrad, mut, vt)
 
 		-- update gradients
-		self.gradWeight:copy(self.posGrad:csub(self.negGrad))
-		self.gradVbias:copy(v1:csub(vt))
-		self.gradHbias:copy(torch.csub(self.mu1, mut))
+		self.gradWeight:copy(self.negGrad:csub(self.posGrad))
+		self.gradVbias:copy(vt:csub(v1))
+		self.gradHbias:copy(torch.csub(mut, self.mu1))
 		
 		self.gradInput = {torch.Tensor(), self.gradVbias, self.gradHbias}
 	elseif v1:dim() == 2 then
@@ -151,13 +151,12 @@ function RBM:updateGradInput(input)
 		torch.mm(self.negGrad, mut:t(), vt)
 
 		-- update gradients
-		-- FIXME: fix it for gradient descent
-		self.gradWeight:copy(self.posGrad:csub(self.negGrad):div(nframe))
+		self.gradWeight:copy(self.negGrad:csub(self.posGrad):div(nframe))
 		
-		torch.csub(self.gradVbiasBatch, v1, vt)
+		torch.csub(self.gradVbiasBatch, vt, v1)
 		torch.mean(self.gradVbias, self.gradVbiasBatch, 1)
 		
-		torch.csub(self.gradHbiasBatch, self.mu1, mut)
+		torch.csub(self.gradHbiasBatch, mut, self.mu1)
 		torch.mean(self.gradHbias, self.gradHbiasBatch, 1)
 		
 		self.gradInput = {torch.Tensor(), self.gradVbiasBatch, self.gradHbiasBatch}
@@ -190,12 +189,8 @@ function RBM:freeEnergy(visible)
 end
 
 function RBM:reset()
-    for i = 1, self.n_hidden do
-        for j = 1, self.n_visible do
-            self.weight[i][j] = torch.normal(0, 0.08)
-        end
-    end
-
+    self.weight:normal(0, 0.08)
+    
     self.gradWeight:zero()
     self.gradHbias:zero()
     self.gradVbias:zero()

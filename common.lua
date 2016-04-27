@@ -3,7 +3,7 @@ require 'nn'
 target = torch.Tensor(1)
 
 function momentum_update(derivate, velocity, target, config)
-	derivate:mul(config.learning_rate)
+	derivate:mul(-config.learning_rate)
 	velocity:mul(config.momentum):add(derivate)
 	target:add(velocity)
 end
