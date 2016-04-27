@@ -14,8 +14,8 @@ cmd:text('Options')
 -- data
 cmd:option('-data_dir','train','data directory. Should contain MIDI files.')
 -- model params
-cmd:option('-rnn_model','models/recurrence-rnn_10.dat','Recurrent module')
-cmd:option('-mlp_model','models/recurrence-mlp_10.dat','MLP module with bias and RBM part')
+cmd:option('-rnn_model','models/recurrence-rnn_1.dat','Recurrent module')
+cmd:option('-mlp_model','models/recurrence-mlp_1.dat','MLP module with bias and RBM part')
 
 cmd:option('-n_hidden', 50, 'RBM hidden layer size.')
 cmd:option('-n_recurrent', 64, 'Recurrent hidden size.')
@@ -35,34 +35,28 @@ init_pool(opt)
 rnn = torch.load(opt.rnn_model)
 mlp = torch.load(opt.mlp_model)
 
-rnn:forget()
-mlp:forget()
 rnn:evaluate()
 mlp:evaluate()
 
 piano_roll = torch.Tensor(opt.length, opt.n_visible)
 zeros = torch.zeros(opt.n_visible)
 
-rnn_outputs={}
-rnn_outputs[0] = torch.zeros(opt.n_recurrent)
-
--- initial sequence
-for t=1, opt.rho do
-    rnn_outputs[t] = rnn:forward(input_pool[t+256]:double())
-    local sampled_v = mlp:forward{input_pool[t+256]:double(), rnn_outputs[t-1]}
-
-    piano_roll[t]:copy(sampled_v)
-end
-
 -- sample whole piano-roll
-for t=opt.rho+1, opt.length do
-	rnn_outputs[t] = rnn:forward(zeros)
-    local sampled_v = mlp:forward{zeros, rnn_outputs[t-1]}
-    piano_roll[t]:copy(sampled_v)
+rnn_inputs = {}
+for i=1, opt.length-1 do
+	rnn_inputs[i]=zeros
 end
+rnn_outputs = rnn:forward(rnn_inputs)
 
-piano_roll = piano_roll[{{opt.rho, opt.length}, {}}]
-opt.length = opt.length-opt.rho-1
+mlp_inputs = {}
+for i=2, opt.length do
+	mlp_inputs[i-1]={zeros, rnn_outputs[i-1]}
+end
+mlp_outputs = mlp:forward(mlp_inputs)
+
+for t=1, #mlp_outputs do
+    piano_roll[t]:copy(mlp_outputs[t])
+end
 
 gnuplot.pngfigure(opt.o..'.png')
 gnuplot.imagesc(piano_roll:t())

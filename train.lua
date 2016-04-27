@@ -4,6 +4,7 @@ require 'common'
 require 'paths'
 require 'nn'
 require 'rnn'
+require 'optim'
 require 'plot_stats'
 
 cmd = torch.CmdLine()
@@ -228,9 +229,9 @@ end
 
 -- 2) finetune recurrence
 if opt.model == 'lstm' then
-	rnn = nn.LSTM(opt.n_visible, opt.n_recurrent, opt.rho-1)
+	rnn_inner = nn.LSTM(opt.n_visible, opt.n_recurrent, opt.rho-1)
 elseif opt.model == 'gru' then
-	rnn = nn.GRU(opt.n_visible, opt.n_recurrent, opt.rho-1)
+	rnn_inner = nn.GRU(opt.n_visible, opt.n_recurrent, opt.rho-1)
 else
 	error("invalid model type")
 end
@@ -248,7 +249,8 @@ mlp_inner = nn.Sequential()
     :add(nn.FlattenTable())
     :add(rbm)
 
-mlp = nn.Recursor(mlp_inner, opt.rho-1)
+mlp = nn.Sequencer(mlp_inner)
+rnn = nn.Sequencer(rnn_inner)
 
 train_size = number_count - 1
 rnn_learning_rate = opt.rms_learning_rate
@@ -259,62 +261,64 @@ for t=1, opt.rho do
 end
 
 rnnP, rnnG = rnn:getParameters()
-rnnM = torch.Tensor():typeAs(rnnP):resizeAs(rnnG):zero()
-rnnTmp = torch.Tensor():typeAs(rnnP):resizeAs(rnnG)
-
 mlpP, mlpG = mlp:getParameters()
-mlpM = torch.Tensor():typeAs(mlpP):resizeAs(mlpG):zero()
-mlpTmp = torch.Tensor():typeAs(mlpP):resizeAs(mlpG)
 
-function fine_feval()
+dl_dx = nn.Module.flatten{rnnG, mlpG}
+x = nn.Module.flatten{rnnP, mlpP}
+
+fine_feval = function(x_new)
+	if x ~= x_new then
+		x:copy(x_new)
+	end
+
     load_batch(batch_time, inputs, opt)
     batch_time = batch_time + 1
 
     rnn:zeroGradParameters()
     mlp:zeroGradParameters()
-    
-    rnn:forget()
-    mlp:forget()
 
-	rnn_outputs, mlp_outputs, mlp_grads  = {}, {}, {}
-	-- 1) prop rnn
-	for step=1,opt.rho-1 do
-		rnn_outputs[step] = rnn:forward(inputs[step])
+	local rnn_inputs = {}
+	local mlp_inputs = {}
+
+	for i=1, #inputs-1 do
+		rnn_inputs[i]=inputs[i]
 	end
+
+	-- 1) prop rnn
+	local rnn_outputs = rnn:forward(rnn_inputs)
 
 	-- 2) generate negative phase of RBM
-	for step=2,opt.rho do
-		mlp:forward{inputs[step], rnn_outputs[step-1]}
+	for i=2, #inputs do
+		mlp_inputs[i-1]={inputs[i], rnn_outputs[i-1]}
 	end
+
+	mlp:forward(mlp_inputs)
 
 	-- 3) backprop rbm gradients
-	for step=opt.rho,2,-1 do
-		mlp_grads[step] = mlp:backward{inputs[step], rnn_outputs[step-1]}
-	end
-	
+	local mlp_grads = mlp:backward(mlp_inputs, mlp_inputs)
+
 	-- 4) backprop through time gradients
-	for step=opt.rho-1,1,-1 do
-		rnn:backward(inputs[step], mlp_grads[step+1][2])
+	local mlp_grads_hid = {}
+	for i=1, #mlp_grads do
+		mlp_grads_hid[i] = mlp_grads[i][2]
 	end
 
-	--rnn:forget()
-    --mlp:forget()
+	rnn:backward(rnn_inputs, mlp_grads_hid)
 
-	--rmsprop(rnnG, rnnM, rnnTmp, opt)
-	--rmsprop(mlpG, mlpM, mlpTmp, opt)
-
-	mlp:updateParameters(rnn_learning_rate)
-	rnn:updateParameters(rnn_learning_rate)
+	return _, dl_dx
 end
+
+params = {
+	learningRate = opt.rms_learning_rate,
+	alpha = opt.rms_decay_rate
+}
+
+rnn:training()
+mlp:training()
 
 for epoch=1, opt.max_epochs do
 	print('finetune epoch '..epoch)
 	batch_time = 1
-
-	mlp:training()
-	rnn:training()
-	rnnM:zero()
-	mlpM:zero()
 
 	if epoch >= opt.learning_rate_decay_after then
 		rnn_learning_rate = rnn_learning_rate * opt.learning_rate_decay
@@ -322,12 +326,9 @@ for epoch=1, opt.max_epochs do
 	end
 
     for i = 1, train_size do
-        fine_feval()
+		optim.sgd(fine_feval, x, params)
 		xlua.progress(i, train_size)
     end
-    
-    rnn:forget()
-    mlp:forget()
 	
 	torch.save('models/recurrence-rnn_'..epoch..'.dat', rnn)
 	torch.save('models/recurrence-mlp_'..epoch..'.dat', mlp)
