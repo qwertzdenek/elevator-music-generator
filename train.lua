@@ -27,14 +27,16 @@ cmd:option('-sparsity_decay_rate',0.9,'decay rate for sparsity')
 cmd:option('-sparsity_target',0.07,'sparsity target')
 cmd:option('-sparsity_cost',0.0085,'sparsity cost')
 
-cmd:option('-rms_learning_rate',0.04,'learning rate for rmsprop')
+cmd:option('-rms_learning_rate',0.02,'learning rate for rmsprop')
 cmd:option('-rms_decay_rate',0.95,'decay rate for rmsprop')
 
 cmd:option('-rho',16,'number of timesteps to unroll for')
-cmd:option('-batch_size',10,'number of sequences to train on in parallel')
+cmd:option('-batch_size',24,'number of sequences to train on in parallel')
 cmd:option('-max_epochs',12,'number of full passes through the training data')
 cmd:option('-stat_interval',2048,'statistics interval')
 cmd:option('-init_rbm_from', '', 'initialize RBM from this file')
+cmd:option('-prefix', '', 'prefix of this run')
+cmd:option('-v', false, 'verbose mode')
 
 opt = cmd:parse(arg)
 torch.seed()
@@ -56,12 +58,10 @@ for i=1, test_size do
 	load_batch(train_size+i, {input}, opt)
 	test[i] = input:clone()
 end
-for i=1, test_size do
+for i=1, train_size do
 	load_batch(i, {input}, opt)
 	train[i] = input:clone()
 end
-
-paths.mkdir('models')
 
 function reconstruction_test()
 	local err = 0
@@ -73,20 +73,20 @@ function reconstruction_test()
 		err = err + diff:abs():mean()
 	end
 
-	return err
+	return (err/test_size)*100
 end
 
 function reconstruction_train()
 	local err = 0
 
-	for i=1, test_size do
+	for i=1, train_size do
 		local v1 = train[i]
 		local v2 = rbm:gibbs(v1)
 		local diff = torch.csub(v1, v2)
 		err = err + diff:abs():mean()
 	end
 
-	return err
+	return (err/train_size)*100
 end
 
 function free_energy_test()
@@ -94,21 +94,21 @@ function free_energy_test()
 	local v1 = torch.Tensor(28*28)
 
 	for i=1, test_size do
-		err = err + rbm:freeEnergy(train[i])
+		err = err + rbm:freeEnergy(test[i])
 	end
 
-	return err
+	return err/test_size
 end
 
 function free_energy_train()
 	local err = 0
 	local v1 = torch.Tensor(28*28)
 
-	for i=1, test_size do
+	for i=1, train_size do
 		err = err + rbm:freeEnergy(train[i])
 	end
 
-	return err
+	return err/train_size
 end
 
 function rmsprop(dx, m, tmp, config)
@@ -129,13 +129,11 @@ function pretrain_feval(x_new)
 		x:copy(x_new)
 	end
 
-	local err = 0
-	
 	load_batch(batch_time, {input}, opt)
 	batch_time = batch_time + 1
 	
 	local pred = rbm:forward(input)
-	err = err + criterion:forward(pred, input)
+	local err = criterion:forward(pred, input)
 	rbm:backward(input)
 
 	momentum_update(dl_dx, velocity, x, opt)
@@ -185,14 +183,14 @@ else
 		velocity:zero()
 		
 		if epoch == math.floor(pretrain_epochs*0.5) then
-			torch.save('models/pretrained_rbm_'..epoch..'.dat', rbm)
+			torch.save('models/'..opt.prefix..'pretrained_rbm_'..epoch..'.dat', rbm)
 			config.momentum = 0.8
 		end
 		if epoch == math.floor(pretrain_epochs*0.72) then
 			config.momentum = 0.9
 		end
 		if epoch == pretrain_epochs then
-			torch.save('models/pretrained_rbm_'..epoch..'.dat', rbm)
+			torch.save('models/'..opt.prefix..'pretrained_rbm_'..epoch..'.dat', rbm)
 		end
 
 		for t = 1, train_size do
@@ -207,22 +205,26 @@ else
 				local energy_test = free_energy_test(rbm)
 				local energy_train = free_energy_train(rbm)
 
-				print(string.format('%s t=%d loss=%.4f test=%.4f train=%.4f ftest=%.4f ftrain=%.4f', os.date("%d/%m %H:%M:%S"), t, err/opt.stat_interval, test, train, energy_test, energy_train))
+				print(string.format('%s t=%d loss=%.4f test=%.4f%% train=%.4f%% ftest=%.4f ftrain=%.4f', os.date("%d/%m %H:%M:%S"), t, err/opt.stat_interval, test, train, energy_test, energy_train))
 				
 				-- reset counters
 				err = 0; iter = 0
 				
-				draw_hist(rbm.mu1:mean(1), 'mean_hidden-'..epoch..'-'..t)
+				if opt.v then
+					draw_hist(rbm.mu1:mean(1), 'mean_hidden-'..epoch..'-'..t)
+				end
 			end
 		end
 
-		draw_stats(histogramValues, 'hist_'..epoch)
+		if opt.v then
+			draw_stats(histogramValues, 'hist_'..epoch)
 
-		gnuplot.pngfigure('images/weight-map_'..epoch..'.png')
-		gnuplot.ylabel('skryté')
-		gnuplot.xlabel('viditelné')
-		gnuplot.imagesc(rbm.weight)
-		gnuplot.plotflush()
+			gnuplot.pngfigure('images/weight-map_'..epoch..'.png')
+			gnuplot.ylabel('skryté')
+			gnuplot.xlabel('viditelné')
+			gnuplot.imagesc(rbm.weight)
+			gnuplot.plotflush()
+		end
 	end
 end
 
@@ -297,9 +299,6 @@ function fine_feval()
 		rnn:backward(inputs[step], mlp_grads[step+1][2])
 	end
 
-	--rnn:forget()
-    --mlp:forget()
-
 	--rmsprop(rnnG, rnnM, rnnTmp, opt)
 	--rmsprop(mlpG, mlpM, mlpTmp, opt)
 
@@ -307,12 +306,47 @@ function fine_feval()
 	rnn:updateParameters(rnn_learning_rate)
 end
 
+function evaluate()
+	mlp:evaluate()
+	rnn:evaluate()
+	
+	likelihood = 0
+	accuracy = 0
+	local rnn_output = rnn:forward(torch.zeros(opt.batch_size, opt.n_visible))
+	for i=1, test_size do
+		local pred = mlp:forward{test[i], rnn_output}
+		rnn_output = rnn:forward(test[i])
+		
+		likelihood = likelihood + criterion:forward(pred, test[i])
+		accuracy = accuracy + torch.sum(torch.abs(pred-test[i]))/(pred:size(1)*pred:size(2))
+	end
+	
+	mlp:training()
+	rnn:training()
+	
+	return likelihood/test_size, (accuracy/test_size)*100
+end
+
+paths.mkdir('models')
+
+mlp:training()
+rnn:training()
+
+-- ## CUT here
+--~ rnn = torch.load('models/'..opt.prefix..'recurrence-rnn_12.dat')
+--~ mlp = torch.load('models/'..opt.prefix..'recurrence-mlp_12.dat')
+
+--~ likelihood, accuracy = evaluate()
+    
+--~ print(string.format('likelihood=%.4f', likelihood))
+--~ print(string.format('accuracy=%.4f', accuracy))
+
+--~ os.exit(0)
+
 for epoch=1, opt.max_epochs do
 	print('finetune epoch '..epoch)
 	batch_time = 1
 
-	mlp:training()
-	rnn:training()
 	rnnM:zero()
 	mlpM:zero()
 
@@ -326,9 +360,14 @@ for epoch=1, opt.max_epochs do
 		xlua.progress(i, train_size)
     end
     
-    rnn:forget()
-    mlp:forget()
-	
-	torch.save('models/recurrence-rnn_'..epoch..'.dat', rnn)
-	torch.save('models/recurrence-mlp_'..epoch..'.dat', mlp)
+    likelihood, accuracy = evaluate()
+    
+    print(string.format('likelihood=%.4f', likelihood))
+    print(string.format('accuracy=%.4f', accuracy))
+
+	torch.save('models/'..opt.prefix..'recurrence-rnn_'..epoch..'.dat', rnn)
+	torch.save('models/'..opt.prefix..'recurrence-mlp_'..epoch..'.dat', mlp)
 end
+
+rnn:forget()
+mlp:forget()
