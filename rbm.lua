@@ -59,16 +59,16 @@ function RBM:updateOutputExpected(v_t)
 end
 
 -- propdown
-function RBM:updateInputExpected(v_t)
-    if v_t:dim() == 1 then
+function RBM:updateInputExpected(h_t)
+    if h_t:dim() == 1 then
       self.input:resize(self.weight:size(2))
       self.input:copy(self.vbias)
-      self.input:addmv(1, self.weight:t(), v_t)
+      self.input:addmv(1, self.weight:t(), h_t)
       if self.vbiaslt ~= nil then self.input:add(self.vbiaslt) end
-   elseif v_t:dim() == 2 then
-      local nframe = v_t:size(1)
+   elseif h_t:dim() == 2 then
+      local nframe = h_t:size(1)
       self.input:resize(nframe, self.weight:size(2))
-      self.input:mm(v_t, self.weight)
+      self.input:mm(h_t, self.weight)
       self.input:add(self.vbias:view(1, self.n_visible)
           :expand(nframe, self.n_visible))
       if self.vbiaslt ~= nil then

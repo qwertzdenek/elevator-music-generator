@@ -17,12 +17,11 @@ cmd:option('-data_dir','train','data directory. Should contain MIDI files.')
 cmd:option('-rnn_model','models/recurrence-rnn_10.dat','Recurrent module')
 cmd:option('-mlp_model','models/recurrence-mlp_10.dat','MLP module with bias and RBM part')
 
-cmd:option('-n_hidden', 50, 'RBM hidden layer size.')
-cmd:option('-n_recurrent', 64, 'Recurrent hidden size.')
+cmd:option('-n_hidden', 20, 'RBM hidden layer size.')
+cmd:option('-n_recurrent', 50, 'Recurrent hidden size.')
 
 cmd:option('-length',300,'sample length')
-cmd:option('-rho',16,'number of timesteps to unroll for')
-cmd:option('-batch_size',10,'number of sequences to train on in parallel')
+cmd:option('-rho',32,'number of timesteps to unroll for')
 cmd:option('-o', 'sampled.mid', 'output mid file')
 
 opt = cmd:parse(arg)
@@ -56,8 +55,8 @@ end
 
 -- sample whole piano-roll
 for t=opt.rho+1, opt.length do
-	rnn_outputs[t] = rnn:forward(zeros)
-    local sampled_v = mlp:forward{zeros, rnn_outputs[t-1]}
+	rnn_outputs[t] = rnn:forward(input_pool[t+256+opt.rho]:double())
+    local sampled_v = mlp:forward{input_pool[t+256+opt.rho]:double(), rnn_outputs[t-1]}
     piano_roll[t]:copy(sampled_v)
 end
 
