@@ -18,30 +18,31 @@ cmd:option('-v', false, 'verbose mode')
 
 -- model params
 cmd:text('Model parameters')
-cmd:option('-n_hidden', 20, 'RBM hidden layer size.')
-cmd:option('-n_recurrent', 50, 'Recurrent hidden size.')
+cmd:option('-n_hidden', 150, 'RBM hidden layer size.')
+cmd:option('-n_recurrent', 100, 'Recurrent hidden size.')
 cmd:option('-model', 'lstm', 'lstm or gru')
 cmd:option('-init_rbm_from', '', 'initialize RBM from this file')
 
 cmd:text('Optimalization parameters')
 -- optimization
-cmd:option('-learning_rate',0.02,'learning rate')
+cmd:option('-learning_rate',0.018,'learning rate')
 cmd:option('-momentum',0.5,'momentum')
-cmd:option('-max_pretrain_epochs', 32, 'number of full passes through the training data while RBM pretrain')
+cmd:option('-max_pretrain_epochs', 100, 'number of full passes through the training data while RBM pretrain')
 
 cmd:option('-sparsity_decay_rate',0.9,'decay rate for sparsity')
 cmd:option('-sparsity_target',0.08,'sparsity target')
-cmd:option('-sparsity_cost',0.012,'sparsity cost')
+cmd:option('-sparsity_cost',0.0012,'sparsity cost')
 
 cmd:option('-sgd_learning_rate',0.004,'learning rate for SGD')
 --cmd:option('-rmsprop_decay_rate',0.95,'decay rate for RMSProp')
 cmd:option('-sgd_learning_rate_decay',0.97,'learning rate decay')
 cmd:option('-sgd_learning_rate_decay_after',40,'in number of epochs, when to start decaying the learning rate')
-cmd:option('-max_epochs',100,'number of full passes through the training data')
+cmd:option('-max_epochs',200,'number of full passes through the training data')
 
 cmd:option('-rho',32,'number of timesteps to unroll for')
-cmd:option('-batch_size',12,'number of sequences to train on in parallel')
-cmd:option('-stat_interval',512,'statistics interval')
+cmd:option('-batch_size',100,'number of sequences to train on in parallel')
+cmd:option('-stat_interval',256,'statistics interval')
+cmd:option('-opencl', false,'use OpenCL backend')
 
 opt = cmd:parse(arg)
 torch.seed()
@@ -69,6 +70,15 @@ end
 for i=1, train_size do
 	load_batch(i, {input}, opt)
 	train[i] = input:clone()
+end
+
+if opt.opencl then
+	require 'cltorch'
+
+	cltorch.setTrace(1)
+
+	test:cl()
+	train:cl()
 end
 
 function reconstruction_test()
@@ -132,22 +142,17 @@ end
 -- 1) Run RBM pretrain
 criterion = nn.BCECriterion()
 
-function pretrain_feval(x_new)
-	if x ~= x_new then
-		x:copy(x_new)
-	end
+function pretrain_feval(t)
+	local visible = train[t]
 
-	load_batch(batch_time, {input}, opt)
-	batch_time = batch_time + 1
-
-	local pred = rbm:forward(input)
-	local err = criterion:forward(pred, input)
-	rbm:backward(input)
+	local pred = rbm:forward(visible)
+	local err = criterion:forward(pred, visible)
+	rbm:backward(visible)
 
 	momentum_update(dl_dx, velocity, x, opt)
-	sparsity_update(rbm, qval, input, opt)
+	sparsity_update(rbm, qval, visible, opt)
 
-	return err, dl_dx
+	return err
 end
 
 if string.len(opt.init_rbm_from) > 0 then
@@ -181,11 +186,18 @@ else
 	  hbiasVelocity = hbiasVelocity
 	}
 
-	batch_time = 1
+	if opt.opencl then
+		criterion:cl()
+		rbm:cl()
+		weightVelocity:cl()
+		vbiasVelocity:cl()
+		hbiasVelocity:cl()
+		qval:cl()
+	end
+
 	err = 0; iter = 0
 	for epoch=1, opt.max_pretrain_epochs do
 		print('pretrain epoch '..epoch)
-		batch_time = 1
 
 		velocity:zero()
 
@@ -203,8 +215,7 @@ else
 		for t = 1, train_size do
 			iter = iter + 1
 
-			e, dx = pretrain_feval(x)
-			err = err + e
+			err = err + pretrain_feval(t)
 
 			if iter >= opt.stat_interval then
 				local test = reconstruction_test(rbm)
@@ -266,17 +277,24 @@ for t=1, opt.rho do
 	inputs[t] = torch.Tensor(opt.batch_size, roll_height)
 end
 
-rnnP, rnnG = rnn:getParameters()
-rnnM = torch.Tensor():typeAs(rnnP):resizeAs(rnnG):zero()
-rnnTmp = torch.Tensor():typeAs(rnnP):resizeAs(rnnG)
+-- RMSProp parameters, in case it is solved in upstream
+--~ rnnP, rnnG = rnn:getParameters()
+--~ rnnM = torch.Tensor():typeAs(rnnP):resizeAs(rnnG):zero()
+--~ rnnTmp = torch.Tensor():typeAs(rnnP):resizeAs(rnnG)
 
-mlpP, mlpG = mlp:getParameters()
-mlpM = torch.Tensor():typeAs(mlpP):resizeAs(mlpG):zero()
-mlpTmp = torch.Tensor():typeAs(mlpP):resizeAs(mlpG)
+--~ mlpP, mlpG = mlp:getParameters()
+--~ mlpM = torch.Tensor():typeAs(mlpP):resizeAs(mlpG):zero()
+--~ mlpTmp = torch.Tensor():typeAs(mlpP):resizeAs(mlpG)
 
-function fine_feval()
-	load_batch(batch_time, inputs, opt)
-	batch_time = batch_time + 1
+if opt.opencl then
+	rnn:cl()
+	mlp:cl()
+
+	inputs:cl()
+end
+
+function fine_feval(t)
+	load_batch(t, inputs, opt)
 
 	rnn:zeroGradParameters()
 	mlp:zeroGradParameters()
@@ -353,24 +371,20 @@ rnn:training()
 
 for epoch=1, opt.max_epochs do
 	print('finetune epoch '..epoch)
-	batch_time = 1
-
-	rnnM:zero()
-	mlpM:zero()
 
 	if epoch % 4 == 0 and epoch >= opt.sgd_learning_rate_decay_after then
 		rnn_learning_rate = rnn_learning_rate * opt.sgd_learning_rate_decay
 		print('decayed learning rate by a factor ' .. opt.sgd_learning_rate_decay .. ' to ' .. rnn_learning_rate)
 	end
 
-	for i = 1, train_size do
-		fine_feval()
-		xlua.progress(i, train_size)
+	for t = 1, number_count do
+		fine_feval(t)
+		xlua.progress(t, number_count)
 	end
 
 	likelihood, precision, recall, accuracy, fmeasure = evaluate()
 
-	print(string.format('  Negative log-likelihood=%.4f', -likelihood))
+	print(string.format('  log-likelihood=%.4f', -likelihood))
 	print(string.format('  Precision=%.4f', precision))
 	print(string.format('  Recall=%.4f', recall))
 	print(string.format('  Accuracy=%.4f', accuracy))

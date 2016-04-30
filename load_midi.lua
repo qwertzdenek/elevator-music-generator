@@ -10,24 +10,28 @@ function init_pool(conf)
 	for fname in paths.files(conf.data_dir) do
 		if fname ~= '..' and fname ~= '.' then
 			local piano_roll = load_song(conf.data_dir..'/'..fname)
-			
+
 			for t=1, piano_roll:size(2) do
 				-- input
 				local input = torch.ByteTensor(roll_height)
 				input:copy(piano_roll[{{}, t}])
 				table.insert(input_pool, input)
-				
+
 				if #input_pool%(conf.batch_size+conf.rho-1)==0 then
 					number_count = number_count + 1
 				end
 			end
 		end
 	end
+
+	if conf.opencl then
+		input_pool:cl()
+	end
 end
 
 function load_batch(number, batch, conf)
     assert(number<=number_count, "non existing batch")
-    
+
     -- because indexing from 1 sucks
     local begin = (number-1)*#batch+1
 
@@ -42,7 +46,7 @@ function load_song(name)
     local f=assert(io.open(name, 'r'))
     local score=MIDI.midi2score(f:read('*all'))
     local stats=MIDI.score2stats(score)
-    
+
     -- read only assigned tracks
     local assigned = {}
     for key, val in pairs(stats['channels_by_track']) do
@@ -50,13 +54,13 @@ function load_song(name)
             table.insert(assigned, key+1)
         end
     end
-    
+
     local division_4 = score[1]
     local division_32 = division_4 / 4
     local song_len = stats['nticks']
-    
+
     local song_bitmap = torch.ByteTensor(roll_height, math.ceil(song_len / division_32)+2):zero()
-    
+
     -- for each track with music
     for key, track in pairs(assigned) do
         -- for each event
@@ -66,13 +70,13 @@ function load_song(name)
                 start = math.ceil(event[2] / division_32) + 1
                 duration = math.ceil(event[3] / division_32)
                 note = event[5]
-                
+
                 if note >= 21 and note <= 88 then
 					song_bitmap[{note-20, {start, start+duration}}] = 1
                 end
             end
         end
     end
-    
+
     return song_bitmap
 end

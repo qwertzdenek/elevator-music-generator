@@ -1,4 +1,5 @@
 require 'common'
+require 'nn'
 
 local RBM, parent = torch.class('RBM', 'nn.Module')
 
@@ -139,9 +140,9 @@ function RBM:updateGradInput(input)
 		torch.ger(self.negGrad, mut, vt)
 
 		-- update gradients
-		self.gradWeight:copy(self.negGrad:csub(self.posGrad))
-		self.gradVbias:copy(vt:csub(v1))
-		self.gradHbias:copy(torch.csub(mut, self.mu1))
+		torch.csub(self.gradWeight, self.negGrad, self.posGrad)
+		torch.csub(self.gradVbias, vt, v1)
+		torch.csub(self.gradHbias, mut, self.mu1)
 		
 		self.gradInput = {torch.Tensor(), self.gradVbias, self.gradHbias}
 	elseif v1:dim() == 2 then
@@ -151,7 +152,8 @@ function RBM:updateGradInput(input)
 		torch.mm(self.negGrad, mut:t(), vt)
 
 		-- update gradients
-		self.gradWeight:copy(self.negGrad:csub(self.posGrad):div(nframe))
+		torch.csub(self.gradWeight, self.negGrad, self.posGrad)
+		self.gradWeight:div(nframe)
 		
 		torch.csub(self.gradVbiasBatch, vt, v1)
 		torch.mean(self.gradVbias, self.gradVbiasBatch, 1)
