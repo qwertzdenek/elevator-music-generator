@@ -46,6 +46,7 @@ function load_song(name)
     local f=assert(io.open(name, 'r'))
     local score=MIDI.midi2score(f:read('*all'))
     local stats=MIDI.score2stats(score)
+    f:close()
 
     -- read only assigned tracks
     local assigned = {}

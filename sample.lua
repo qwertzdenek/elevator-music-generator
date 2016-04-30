@@ -17,11 +17,12 @@ cmd:option('-data_dir','train','data directory. Should contain MIDI files.')
 cmd:option('-rnn_model','models/recurrence-rnn_10.dat','Recurrent module')
 cmd:option('-mlp_model','models/recurrence-mlp_10.dat','MLP module with bias and RBM part')
 
-cmd:option('-n_hidden', 20, 'RBM hidden layer size.')
-cmd:option('-n_recurrent', 50, 'Recurrent hidden size.')
+cmd:option('-n_hidden', 150, 'RBM hidden layer size.')
+cmd:option('-n_recurrent', 100, 'Recurrent hidden size.')
 
 cmd:option('-length',300,'sample length')
 cmd:option('-rho',32,'number of timesteps to unroll for')
+cmd:option('-batch_size',100,'number of sequences to train on in parallel')
 cmd:option('-o', 'sampled.mid', 'output mid file')
 
 opt = cmd:parse(arg)
@@ -47,16 +48,16 @@ rnn_outputs[0] = torch.zeros(opt.n_recurrent)
 
 -- initial sequence
 for t=1, opt.rho do
-    rnn_outputs[t] = rnn:forward(input_pool[t+256]:double())
-    local sampled_v = mlp:forward{input_pool[t+256]:double(), rnn_outputs[t-1]}
+    rnn_outputs[t] = rnn:forward(input_pool[t]:double())
+    local sampled_v = mlp:forward{input_pool[t]:double(), rnn_outputs[t-1]}
 
     piano_roll[t]:copy(sampled_v)
 end
 
 -- sample whole piano-roll
 for t=opt.rho+1, opt.length do
-	rnn_outputs[t] = rnn:forward(input_pool[t+256+opt.rho]:double())
-    local sampled_v = mlp:forward{input_pool[t+256+opt.rho]:double(), rnn_outputs[t-1]}
+	rnn_outputs[t] = rnn:forward(input_pool[t+opt.rho]:double())
+    local sampled_v = mlp:forward{input_pool[t+opt.rho]:double(), rnn_outputs[t-1]}
     piano_roll[t]:copy(sampled_v)
 end
 
