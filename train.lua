@@ -1,9 +1,6 @@
 require 'load_midi'
-require 'rbm'
 require 'common'
 require 'paths'
-require 'nn'
-require 'rnn'
 require 'plot_stats'
 
 cmd = torch.CmdLine()
@@ -27,7 +24,7 @@ cmd:text('Optimalization parameters')
 -- optimization
 cmd:option('-learning_rate',0.018,'learning rate')
 cmd:option('-momentum',0.5,'momentum')
-cmd:option('-max_pretrain_epochs', 100, 'number of full passes through the training data while RBM pretrain')
+cmd:option('-max_pretrain_epochs', 50, 'number of full passes through the training data while RBM pretrain')
 
 cmd:option('-sparsity_decay_rate',0.9,'decay rate for sparsity')
 cmd:option('-sparsity_target',0.08,'sparsity target')
@@ -37,12 +34,13 @@ cmd:option('-sgd_learning_rate',0.004,'learning rate for SGD')
 --cmd:option('-rmsprop_decay_rate',0.95,'decay rate for RMSProp')
 cmd:option('-sgd_learning_rate_decay',0.97,'learning rate decay')
 cmd:option('-sgd_learning_rate_decay_after',40,'in number of epochs, when to start decaying the learning rate')
-cmd:option('-max_epochs',200,'number of full passes through the training data')
+cmd:option('-max_epochs',140,'number of full passes through the training data')
 
 cmd:option('-rho',32,'number of timesteps to unroll for')
 cmd:option('-batch_size',100,'number of sequences to train on in parallel')
 cmd:option('-stat_interval',256,'statistics interval')
 cmd:option('-opencl', false,'use OpenCL backend')
+cmd:option('-cuda', false,'use CUDA backend')
 
 opt = cmd:parse(arg)
 torch.seed()
@@ -57,6 +55,9 @@ input = torch.DoubleTensor(opt.batch_size, roll_height)
 
 test = {}
 train = {}
+
+-- 512 is enough
+number_count = math.min(512, number_count)
 train_size = math.floor(0.7*number_count)
 test_size = number_count - train_size
 
@@ -74,12 +75,24 @@ end
 
 if opt.opencl then
 	require 'cltorch'
+	require 'clnn'
 
 	cltorch.setTrace(1)
 
-	test:cl()
-	train:cl()
+	test = test:cl()
+	train = train:cl()
+elseif opt.cuda then
+	require 'cutorch'
+	require 'cunn'
+
+	test = test:cuda()
+	train = train:cuda()
+else
+	require 'nn'
 end
+
+require 'rbm'
+require 'rnn'
 
 function reconstruction_test()
 	local err = 0
@@ -187,12 +200,20 @@ else
 	}
 
 	if opt.opencl then
-		criterion:cl()
-		rbm:cl()
-		weightVelocity:cl()
-		vbiasVelocity:cl()
-		hbiasVelocity:cl()
-		qval:cl()
+		criterion = criterion:cl()
+		rbm = rbm:cl()
+		weightVelocity = weightVelocity:cl()
+		vbiasVelocity = vbiasVelocity:cl()
+		hbiasVelocity = hbiasVelocity:cl()
+		qval = qval:cl()
+	end
+	if opt.cuda then
+		criterion = criterion:cuda()
+		rbm = rbm:cuda()
+		weightVelocity = weightVelocity:cuda()
+		vbiasVelocity = vbiasVelocity:cuda()
+		hbiasVelocity = hbiasVelocity:cuda()
+		qval = qval:cuda()
 	end
 
 	err = 0; iter = 0
@@ -229,7 +250,7 @@ else
 				err = 0; iter = 0
 
 				if opt.v then
-					draw_hist(rbm.mu1:mean(1), 'mean_hidden-'..epoch..'-'..t)
+					draw_hist(rbm.mu1:mean(1), 'mean_hidden-'..epoch..'-'..t, 'pravděpodobnost')
 				end
 			end
 		end
@@ -287,10 +308,16 @@ end
 --~ mlpTmp = torch.Tensor():typeAs(mlpP):resizeAs(mlpG)
 
 if opt.opencl then
-	rnn:cl()
-	mlp:cl()
+	rnn = rnn:cl()
+	mlp = mlp:cl()
 
-	inputs:cl()
+	inputs = inputs:cl()
+end
+if opt.cuda then
+	rnn = rnn:cuda()
+	mlp = mlp:cuda()
+
+	inputs = inputs:cuda()
 end
 
 function fine_feval(t)
@@ -377,9 +404,9 @@ for epoch=1, opt.max_epochs do
 		print('decayed learning rate by a factor ' .. opt.sgd_learning_rate_decay .. ' to ' .. rnn_learning_rate)
 	end
 
-	for t = 1, number_count do
+	for t = 1, train_size do
 		fine_feval(t)
-		xlua.progress(t, number_count)
+		--xlua.progress(t, train_size)
 	end
 
 	likelihood, precision, recall, accuracy, fmeasure = evaluate()

@@ -19,8 +19,10 @@ function draw_sc(t, name)
 	gnuplot.plotflush()
 end
 
-function draw_hist(t, name)
+function draw_hist(t, name, label)
 	gnuplot.pngfigure('images/'..name..'.png')
+	gnuplot.xlabel(label)
+	gnuplot.ylabel('četnost')
 	gnuplot.hist(t)
 	gnuplot.plotflush()
 end

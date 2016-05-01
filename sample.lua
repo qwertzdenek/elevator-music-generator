@@ -44,25 +44,15 @@ piano_roll = torch.Tensor(opt.length, opt.n_visible)
 zeros = torch.zeros(opt.n_visible)
 
 rnn_outputs={}
-rnn_outputs[0] = torch.zeros(opt.n_recurrent)
+rnn_outputs[0] = rnn:forward(input_pool[torch.random(1,#input_pool)]:double())
 
 -- initial sequence
-for t=1, opt.rho do
-    rnn_outputs[t] = rnn:forward(input_pool[t]:double())
-    local sampled_v = mlp:forward{input_pool[t]:double(), rnn_outputs[t-1]}
+for t=1, opt.length do
+	local sampled_v = mlp:forward{zeros, rnn_outputs[t-1]}
+	rnn_outputs[t] = rnn:forward(sampled_v)
 
     piano_roll[t]:copy(sampled_v)
 end
-
--- sample whole piano-roll
-for t=opt.rho+1, opt.length do
-	rnn_outputs[t] = rnn:forward(input_pool[t+opt.rho]:double())
-    local sampled_v = mlp:forward{input_pool[t+opt.rho]:double(), rnn_outputs[t-1]}
-    piano_roll[t]:copy(sampled_v)
-end
-
-piano_roll = piano_roll[{{opt.rho, opt.length}, {}}]
-opt.length = opt.length-opt.rho-1
 
 gnuplot.pngfigure(opt.o..'.png')
 gnuplot.imagesc(piano_roll:t())
@@ -74,7 +64,7 @@ division_32 = division_4 / 4
 
 score = {ticks, {}}
 score[2][1] = {"patch_change", 0, 0, 0}
-score[2][2] = {'set_tempo', 0, 1200000}
+score[2][2] = {'set_tempo', 0, 1100000}
 
 counter = 3
 for t=1, opt.length do
@@ -87,7 +77,7 @@ for t=1, opt.length do
             end
             local duration = trace - t + 1
             piano_roll[{{t, trace}, note}]:fill(0)
-            
+
             target_note = note + 20
             if target_note >= 0 and target_note <= 127 then
                 score[2][counter] = {"note", (t-1)*division_32, duration*division_32, 0, target_note, 90}
