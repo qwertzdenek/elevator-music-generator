@@ -2,6 +2,7 @@ require 'load_midi'
 require 'common'
 require 'paths'
 require 'plot_stats'
+require 'optim'
 
 cmd = torch.CmdLine()
 cmd:text()
@@ -24,17 +25,18 @@ cmd:text('Optimalization parameters')
 -- optimization
 cmd:option('-learning_rate',0.018,'learning rate')
 cmd:option('-momentum',0.5,'momentum')
+cmd:option('-L1',0.0008,'L1 decay')
 cmd:option('-max_pretrain_epochs', 50, 'number of full passes through the training data while RBM pretrain')
 
 cmd:option('-sparsity_decay_rate',0.9,'decay rate for sparsity')
 cmd:option('-sparsity_target',0.08,'sparsity target')
-cmd:option('-sparsity_cost',0.0012,'sparsity cost')
+cmd:option('-sparsity_cost',0.0006,'sparsity cost')
 
 cmd:option('-sgd_learning_rate',0.004,'learning rate for SGD')
 --cmd:option('-rmsprop_decay_rate',0.95,'decay rate for RMSProp')
 cmd:option('-sgd_learning_rate_decay',0.97,'learning rate decay')
 cmd:option('-sgd_learning_rate_decay_after',40,'in number of epochs, when to start decaying the learning rate')
-cmd:option('-max_epochs',140,'number of full passes through the training data')
+cmd:option('-max_epochs',80,'number of full passes through the training data')
 
 cmd:option('-rho',32,'number of timesteps to unroll for')
 cmd:option('-batch_size',100,'number of sequences to train on in parallel')
@@ -162,8 +164,13 @@ function pretrain_feval(t)
 	local err = criterion:forward(pred, visible)
 	rbm:backward(visible)
 
+	dl_dx:mul(-opt.learning_rate)
+
+	L1 = torch.sign(rbm.gradWeight)
+	rbm.gradWeight:add(opt.L1, L1)
+
 	momentum_update(dl_dx, velocity, x, opt)
-	sparsity_update(rbm, qval, visible, opt)
+	--sparsity_update(rbm, qval, visible, opt)
 
 	return err
 end
@@ -269,9 +276,9 @@ end
 
 -- 2) finetune recurrence
 if opt.model == 'lstm' then
-	rnn = nn.LSTM(opt.n_visible, opt.n_recurrent, opt.rho-1)
+	rnn_inner = nn.LSTM(opt.n_visible, opt.n_recurrent, opt.rho-1)
 elseif opt.model == 'gru' then
-	rnn = nn.GRU(opt.n_visible, opt.n_recurrent, opt.rho-1)
+	rnn_inner = nn.GRU(opt.n_visible, opt.n_recurrent, opt.rho-1)
 else
 	error("invalid model type")
 end
@@ -289,7 +296,10 @@ mlp_inner = nn.Sequential()
 	:add(nn.FlattenTable())
 	:add(rbm)
 
-mlp = nn.Recursor(mlp_inner, opt.rho-1)
+rnn = nn.Sequencer(rnn_inner, opt.rho-1)
+mlp = nn.Sequencer(mlp_inner, opt.rho-1)
+
+params, gradParam = nn.Container():add(rnn):add(mlp):getParameters()
 
 rnn_learning_rate = opt.sgd_learning_rate
 
@@ -297,15 +307,6 @@ inputs = {}
 for t=1, opt.rho do
 	inputs[t] = torch.Tensor(opt.batch_size, roll_height)
 end
-
--- RMSProp parameters, in case it is solved in upstream
---~ rnnP, rnnG = rnn:getParameters()
---~ rnnM = torch.Tensor():typeAs(rnnP):resizeAs(rnnG):zero()
---~ rnnTmp = torch.Tensor():typeAs(rnnP):resizeAs(rnnG)
-
---~ mlpP, mlpG = mlp:getParameters()
---~ mlpM = torch.Tensor():typeAs(mlpP):resizeAs(mlpG):zero()
---~ mlpTmp = torch.Tensor():typeAs(mlpP):resizeAs(mlpG)
 
 if opt.opencl then
 	rnn = rnn:cl()
@@ -320,45 +321,51 @@ if opt.cuda then
 	inputs = inputs:cuda()
 end
 
-function fine_feval(t)
-	load_batch(t, inputs, opt)
-
-	rnn:zeroGradParameters()
-	mlp:zeroGradParameters()
-
-	rnn:forget()
-	mlp:forget()
-
-	rnn_outputs, mlp_outputs, mlp_grads  = {}, {}, {}
-	-- 1) prop rnn
-	for step=1,opt.rho-1 do
-		rnn_outputs[step] = rnn:forward(inputs[step])
+function fine_feval(x_new)
+	if params ~= x_new then
+		params:copy(x_new)
 	end
+
+	load_batch(batch_number, inputs, opt)
+	batch_number = batch_number + 1
+
+	gradParam:zero()
+
+	local rnn_inputs = {}
+	local mlp_inputs = {}
+
+	for i=1, #inputs-1 do
+		rnn_inputs[i]=inputs[i]
+	end
+
+	-- 1) prop rnn
+	local rnn_outputs = rnn:forward(rnn_inputs)
 
 	-- 2) generate negative phase of RBM
-	for step=2,opt.rho do
-		mlp:forward{inputs[step], rnn_outputs[step-1]}
+	for i=2, #inputs do
+		mlp_inputs[i-1]={inputs[i], rnn_outputs[i-1]}
 	end
+
+	mlp:forward(mlp_inputs)
 
 	-- 3) backprop rbm gradients
-	for step=opt.rho,2,-1 do
-		mlp_grads[step] = mlp:backward{inputs[step], rnn_outputs[step-1]}
+	local mlp_grads = mlp:backward(mlp_inputs, mlp_inputs)
+
+	-- 4) backprop through time rnn gradients
+	local mlp_grads_hid = {}
+	for i=1, #mlp_grads do
+		mlp_grads_hid[i] = mlp_grads[i][2]
 	end
 
-	-- 4) backprop through time gradients
-	for step=opt.rho-1,1,-1 do
-		rnn:backward(inputs[step], mlp_grads[step+1][2])
-	end
+	rnn:backward(rnn_inputs, mlp_grads_hid)
 
-	--rmsprop(rnnG, rnnM, rnnTmp, opt)
-	--rmsprop(mlpG, mlpM, mlpTmp, opt)
-
-	mlp:updateParameters(rnn_learning_rate)
-	rnn:updateParameters(rnn_learning_rate)
+	return _, gradParam
 end
 
 -- returns: likelihood,
 function evaluate()
+	local zeros = torch.zeros(opt.batch_size, opt.n_visible)
+
 	mlp:evaluate()
 	rnn:evaluate()
 
@@ -367,10 +374,18 @@ function evaluate()
 	recall = 0
 	accuracy = 0
 
-	local rnn_output = rnn:forward(torch.zeros(opt.batch_size, opt.n_visible))
+	local rnn_output = rnn_inner:forward(zeros)
 	for i=1, test_size do
-		local pred = mlp:forward{test[i], rnn_output}
-		rnn_output = rnn:forward(test[i])
+		local pred = mlp_inner:forward{zeros, rnn_output}
+		rnn_output = rnn_inner:forward(test[i])
+
+		if pred:ne(pred):sum() > 0 then
+			print(sys.COLORS.red .. ' prediction has NaN/s')
+		end
+
+		if rnn_output:ne(rnn_output):sum() > 0 then
+			print(sys.COLORS.red .. ' hidden rnn has NaN/s')
+		end
 
 		likelihood = likelihood + criterion:forward(pred, test[i])
 
@@ -386,6 +401,11 @@ function evaluate()
 	mlp:training()
 	rnn:training()
 
+	likelihood = likelihood / test_size
+	precision = 100 * precision / test_size
+	recall = 100 * recall / test_size
+	accuracy = 100 * accuracy / test_size
+
 	fmeasure = (2*precision*recall)/(precision + recall)
 
 	return likelihood, precision, recall, accuracy, fmeasure
@@ -398,15 +418,25 @@ rnn:training()
 
 for epoch=1, opt.max_epochs do
 	print('finetune epoch '..epoch)
+	batch_number = 1
 
 	if epoch % 4 == 0 and epoch >= opt.sgd_learning_rate_decay_after then
 		rnn_learning_rate = rnn_learning_rate * opt.sgd_learning_rate_decay
 		print('decayed learning rate by a factor ' .. opt.sgd_learning_rate_decay .. ' to ' .. rnn_learning_rate)
 	end
 
+	local conf = {
+		learningRate = rnn_learning_rate,
+		alpha = opt.sgd_learning_rate_decay
+	}
+
 	for t = 1, train_size do
-		fine_feval(t)
+		optim.rmsprop(fine_feval, params, conf)
 		--xlua.progress(t, train_size)
+
+		if params:ne(params):sum() > 0 then
+			print(sys.COLORS.red .. ' network params has NaN/s')
+		end
 	end
 
 	likelihood, precision, recall, accuracy, fmeasure = evaluate()

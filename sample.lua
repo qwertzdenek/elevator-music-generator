@@ -12,7 +12,7 @@ cmd:text('Sample from the NN-RBM music generator model')
 cmd:text()
 cmd:text('Options')
 -- data
-cmd:option('-data_dir','train','data directory. Should contain MIDI files.')
+cmd:option('-data_dir','test','data directory. Should contain MIDI files.')
 -- model params
 cmd:option('-rnn_model','models/recurrence-rnn_10.dat','Recurrent module')
 cmd:option('-mlp_model','models/recurrence-mlp_10.dat','MLP module with bias and RBM part')
@@ -21,19 +21,19 @@ cmd:option('-n_hidden', 150, 'RBM hidden layer size.')
 cmd:option('-n_recurrent', 100, 'Recurrent hidden size.')
 
 cmd:option('-length',300,'sample length')
-cmd:option('-rho',32,'number of timesteps to unroll for')
-cmd:option('-batch_size',100,'number of sequences to train on in parallel')
 cmd:option('-o', 'sampled.mid', 'output mid file')
 
 opt = cmd:parse(arg)
 torch.seed()
 
 opt.n_visible = roll_height
+opt.batch_size = 1
+opt.rho = 1
 
 init_pool(opt)
 
-rnn = torch.load(opt.rnn_model)
-mlp = torch.load(opt.mlp_model)
+rnn = torch.load(opt.rnn_model).module
+mlp = torch.load(opt.mlp_model).module
 
 rnn:forget()
 mlp:forget()

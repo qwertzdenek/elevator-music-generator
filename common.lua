@@ -1,5 +1,6 @@
 function momentum_update(derivate, velocity, target, config)
-	derivate:mul(-config.learning_rate)
+	--~ derivate:mul(-config.learning_rate)
+
 	velocity:mul(config.momentum):add(derivate)
 	target:add(velocity)
 end
@@ -26,7 +27,7 @@ function sparsity_update(rbm, qold, input, config)
     target:fill(config.sparsity_target)
     local diffP = qcurrent:csub(target)
     local dP_dW = torch.ger(diffP, input:mean(1)[1])
-    
+
     rbm.weight:csub(dP_dW:mul(config.sparsity_cost))
     rbm.hbias:csub(diffP:mul(config.sparsity_cost))
 end
