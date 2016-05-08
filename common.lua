@@ -6,7 +6,14 @@ function momentum_update(derivate, velocity, target, config)
 end
 
 function sample_ber(x)
-	x:csub(torch.rand(x:size())):sign():clamp(0, 1)
+	local r = torch.rand(x:size())
+	if torch.type(x) == 'torch.ClTensor' then
+		r = r:cl()
+	elseif torch.type(x) == 'torch.CudaTensor' then
+		r = r:cuda()
+	end
+
+	x:csub(r):sign():clamp(0, 1)
 	return x
 end
 
@@ -14,7 +21,7 @@ function sparsity_update(rbm, qold, input, config)
 	local target = torch.Tensor(1)
 
 	if config.opencl then
-		target:cl()
+		target = target:cl()
 	end
 
 	-- get moving average of last value and current

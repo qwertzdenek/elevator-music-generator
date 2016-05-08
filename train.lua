@@ -79,16 +79,22 @@ if opt.opencl then
 	require 'cltorch'
 	require 'clnn'
 
-	cltorch.setTrace(1)
-
-	test = test:cl()
-	train = train:cl()
+	for i=1, #test do
+		test[i] = test[i]:cl()
+	end
+	for i=1, #train do
+		train[i] = train[i]:cl()
+	end
 elseif opt.cuda then
 	require 'cutorch'
 	require 'cunn'
 
-	test = test:cuda()
-	train = train:cuda()
+	for i=1, #test do
+		test[i] = test[i]:cuda()
+	end
+	for i=1, #train do
+		train[i] = train[i]:cuda()
+	end
 else
 	require 'nn'
 end
@@ -144,16 +150,6 @@ function free_energy_train()
 	return err/train_size
 end
 
---~ function rmsprop(dx, m, tmp, config)
-	--~ -- calculate new (leaky) mean squared values
-	--~ m:mul(config.rmsprop_decay_rate)
-	--~ m:addcmul(1.0-config.rmsprop_decay_rate, dx, dx)
-
-	--~ -- perform update
-	--~ tmp:sqrt(m):add(config.rmsprop_epsilon)
-	--~ dx:cdiv(tmp)
---~ end
-
 -- 1) Run RBM pretrain
 criterion = nn.BCECriterion()
 
@@ -170,7 +166,7 @@ function pretrain_feval(t)
 	rbm.gradWeight:add(opt.L1, L1)
 
 	momentum_update(dl_dx, velocity, x, opt)
-	--sparsity_update(rbm, qval, visible, opt)
+	sparsity_update(rbm, qval, visible, opt)
 
 	return err
 end
@@ -192,19 +188,7 @@ else
 	vbiasVelocity = rbm.gradVbias:clone()
 	hbiasVelocity = rbm.gradHbias:clone()
 
-	velocity = nn.Module.flatten{weightVelocity, vbiasVelocity, hbiasVelocity}
-	x,dl_dx = rbm:getParameters()
 	qval = torch.zeros(opt.n_hidden, 1)
-
-	histogramValues = {
-	  weight = rbm.weight,
-	  vbias = rbm.vbias,
-	  hbias = rbm.hbias,
-
-	  weightVelocity = weightVelocity,
-	  vbiasVelocity = vbiasVelocity,
-	  hbiasVelocity = hbiasVelocity
-	}
 
 	if opt.opencl then
 		criterion = criterion:cl()
@@ -222,6 +206,19 @@ else
 		hbiasVelocity = hbiasVelocity:cuda()
 		qval = qval:cuda()
 	end
+
+	velocity = nn.Module.flatten{weightVelocity, vbiasVelocity, hbiasVelocity}
+	x,dl_dx = rbm:getParameters()
+
+	histogramValues = {
+	  weight = rbm.weight,
+	  vbias = rbm.vbias,
+	  hbias = rbm.hbias,
+
+	  weightVelocity = weightVelocity,
+	  vbiasVelocity = vbiasVelocity,
+	  hbiasVelocity = hbiasVelocity
+	}
 
 	err = 0; iter = 0
 	for epoch=1, opt.max_pretrain_epochs do
@@ -299,27 +296,31 @@ mlp_inner = nn.Sequential()
 rnn = nn.Sequencer(rnn_inner, opt.rho-1)
 mlp = nn.Sequencer(mlp_inner, opt.rho-1)
 
-params, gradParam = nn.Container():add(rnn):add(mlp):getParameters()
-
-rnn_learning_rate = opt.sgd_learning_rate
-
 inputs = {}
-for t=1, opt.rho do
-	inputs[t] = torch.Tensor(opt.batch_size, roll_height)
-end
 
 if opt.opencl then
 	rnn = rnn:cl()
 	mlp = mlp:cl()
 
-	inputs = inputs:cl()
-end
-if opt.cuda then
+	for t=1, opt.rho do
+		inputs[t] = torch.Tensor(opt.batch_size, roll_height):cl()
+	end
+elseif opt.cuda then
 	rnn = rnn:cuda()
 	mlp = mlp:cuda()
 
-	inputs = inputs:cuda()
+	for t=1, opt.rho do
+		inputs[t] = torch.Tensor(opt.batch_size, roll_height):cuda()
+	end
+else
+	for t=1, opt.rho do
+		inputs[t] = torch.Tensor(opt.batch_size, roll_height)
+	end
 end
+
+params, gradParam = nn.Container():add(rnn):add(mlp):getParameters()
+
+rnn_learning_rate = opt.sgd_learning_rate
 
 function fine_feval(x_new)
 	if params ~= x_new then
