@@ -23,10 +23,6 @@ function init_pool(conf)
 			end
 		end
 	end
-
-	if conf.opencl then
-		input_pool:cl()
-	end
 end
 
 function load_batch(number, batch, conf)
