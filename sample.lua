@@ -1,3 +1,8 @@
+-- sample.lua
+-- Zdeněk Janeček, 2016 (ycdmdj@gmail.com)
+--
+-- University of West Bohemia
+
 require 'load_midi'
 require 'rbm'
 require 'nn'

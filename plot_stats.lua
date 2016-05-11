@@ -1,3 +1,8 @@
+-- plot_stats.lua
+-- Zdeněk Janeček, 2016 (ycdmdj@gmail.com)
+--
+-- University of West Bohemia
+
 require 'gnuplot'
 
 function draw_stats(values, name)

@@ -1,3 +1,8 @@
+-- load_midi.lua
+-- Zdeněk Janeček, 2016 (ycdmdj@gmail.com)
+--
+-- University of West Bohemia
+
 MIDI=require 'MIDI'
 require 'paths'
 
