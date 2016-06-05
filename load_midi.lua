@@ -73,7 +73,7 @@ function load_song(name)
                 duration = math.ceil(event[3] / division_32)
                 note = event[5]
 
-                if note >= 21 and note <= 88 then
+                if note >= 21 and note <= 108 then
 					song_bitmap[{note-20, {start, start+duration}}] = 1
                 end
             end
