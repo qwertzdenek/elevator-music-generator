@@ -111,7 +111,8 @@ function reconstruction_test()
 
 	for i=1, test_size do
 		local v1 = test[i]
-		local v2 = rbm:gibbs(v1)
+		rbm:gibbs(v1)
+		local v2 = rbm.vt
 		local diff = torch.csub(v1, v2)
 		err = err + diff:abs():mean()
 	end
@@ -124,7 +125,8 @@ function reconstruction_train()
 
 	for i=1, train_size do
 		local v1 = train[i]
-		local v2 = rbm:gibbs(v1)
+		rbm:gibbs(v1)
+		local v2 = rbm.vt
 		local diff = torch.csub(v1, v2)
 		err = err + diff:abs():mean()
 	end
@@ -232,10 +234,10 @@ else
 
 		if epoch == math.floor(opt.max_pretrain_epochs*0.5) then
 			torch.save('models/'..opt.prefix..'pretrained_rbm_'..epoch..'.dat', rbm)
-			config.momentum = 0.8
+			opt.momentum = 0.8
 		end
 		if epoch == math.floor(opt.max_pretrain_epochs*0.72) then
-			config.momentum = 0.9
+			opt.momentum = 0.9
 		end
 		if epoch == opt.max_pretrain_epochs then
 			torch.save('models/'..opt.prefix..'pretrained_rbm_'..epoch..'.dat', rbm)
@@ -252,7 +254,7 @@ else
 				local energy_test = free_energy_test(rbm)
 				local energy_train = free_energy_train(rbm)
 
-				print(string.format('%s t=%d loss=%.4f test=%.4f%% train=%.4f%% ftest=%.4f ftrain=%.4f', os.date("%d/%m %H:%M:%S"), t, err/opt.stat_interval, test, train, energy_test, energy_train))
+				print(string.format('%s t=%d loss=%.4f test=%.4f%% train=%.4f%% ftest=%.4f ftrain=%.4f', os.date("%d/%m %H:%M:%S"), t, -err/opt.stat_interval, test, train, energy_test, energy_train))
 
 				-- reset counters
 				err = 0; iter = 0
@@ -276,8 +278,10 @@ else
 end
 
 -- 2) finetune recurrence
+-- TODO: migrate to SeqLSTM and tensor inputs(opt.rho, opt.batch_size, opt.n_visible)
+
 if opt.model == 'lstm' then
-	rnn_inner = nn.LSTM(opt.n_visible, opt.n_recurrent, opt.rho-1)
+	rnn_inner = nn.FastLSTM(opt.n_visible, opt.n_recurrent, opt.rho-1)
 elseif opt.model == 'gru' then
 	rnn_inner = nn.GRU(opt.n_visible, opt.n_recurrent, opt.rho-1)
 else
@@ -394,9 +398,11 @@ function evaluate()
 
 		likelihood = likelihood + criterion:forward(pred, test[i])
 
-		local TP = torch.cmul(pred, test[i]):sum()
-		local FP = torch.cmul(pred:byte(), torch.eq(test[i], 0)):sum()
-		local FN = torch.cmul(torch.eq(pred, 0), test[i]:byte()):sum()
+		pred_ber = mlp_inner:get(3).vt
+
+		local TP = torch.cmul(pred_ber, test[i]):sum()
+		local FP = torch.cmul(pred_ber:byte(), torch.eq(test[i], 0)):sum()
+		local FN = torch.cmul(torch.eq(pred_ber, 0), test[i]:byte()):sum()
 
 		precision = precision + TP / (TP + FP)
 		recall = recall + TP / (TP + FN)
@@ -437,7 +443,7 @@ for epoch=1, opt.max_epochs do
 
 	for t = 1, train_size do
 		optim.rmsprop(fine_feval, params, conf)
-		--xlua.progress(t, train_size)
+		xlua.progress(t, train_size)
 
 		if params:ne(params):sum() > 0 then
 			print(sys.COLORS.red .. ' network params has NaN/s')
